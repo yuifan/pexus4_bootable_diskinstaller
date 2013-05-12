@@ -12,7 +12,7 @@ android_sysbase_modules := \
 	libm \
 	libstdc++ \
 	linker \
-	sh \
+	ash \
 	toolbox \
 	logcat \
 	gdbserver \
@@ -136,12 +136,24 @@ $(installer_tmp_img): $(MKEXT2IMG) $(internal_installerimage_files)
 ######################################################################
 # Now make a data image that contains all the target image files for the
 # installer.
+
 bootldr_bin := $(PRODUCT_OUT)/grub/grub.bin
 installer_target_data_files := \
 	$(INSTALLED_BOOTIMAGE_TARGET) \
 	$(INSTALLED_SYSTEMIMAGE) \
 	$(INSTALLED_USERDATAIMAGE_TARGET) \
 	$(bootldr_bin)
+
+# $(1): src directory
+# $(2): output file
+# $(3): mount point
+# $(4): ext variant (ext2, ext3, ext4)
+# $(5): size of the partition
+define build-installerimage-ext-target
+  @mkdir -p $(dir $(2))
+    $(hide) PATH=$(foreach p,$(INTERNAL_USERIMAGES_BINARY_PATHS),$(p):)$(PATH) \
+          $(MKEXTUSERIMG) $(1) $(2) $(4) $(3) $(5)
+endef
 
 installer_data_img := $(TARGET_INSTALLER_OUT)/installer_data.img
 $(installer_data_img): $(diskinstaller_root)/config.mk \
@@ -157,8 +169,8 @@ $(installer_data_img): $(diskinstaller_root)/config.mk \
 		$(TARGET_INSTALLER_OUT)/data/system.img
 	cp -f $(INSTALLED_USERDATAIMAGE_TARGET) \
 		$(TARGET_INSTALLER_OUT)/data/userdata.img
-	$(call build-userimage-ext2-target,$(TARGET_INSTALLER_OUT)/data,$@,\
-		inst_data,)
+	$(call build-installerimage-ext-target,$(TARGET_INSTALLER_OUT)/data,$@, \
+		inst_data,ext4,$(BOARD_INSTALLERIMAGE_PARTITION_SIZE))
 	@echo --- Finished installer data image -[ $@ ]-
 
 ######################################################################
@@ -167,8 +179,8 @@ grub_bin := $(PRODUCT_OUT)/grub/grub.bin
 installer_layout := $(diskinstaller_root)/installer_img_layout.conf
 edit_mbr := $(HOST_OUT_EXECUTABLES)/editdisklbl
 
-INSTALLED_DISKINSTALLERIMAGE_TARGET := $(PRODUCT_OUT)/installer.img
-$(INSTALLED_DISKINSTALLERIMAGE_TARGET): \
+INSTALLED_DISK_INSTALLER_IMAGE_TARGET := $(PRODUCT_OUT)/installer.img
+$(INSTALLED_DISK_INSTALLER_IMAGE_TARGET): \
 					$(installer_tmp_img) \
 					$(installer_data_img) \
 					$(grub_bin) \
@@ -176,33 +188,104 @@ $(INSTALLED_DISKINSTALLERIMAGE_TARGET): \
 					$(installer_layout)
 	@echo "Creating bootable installer image: $@"
 	@rm -f $@
-	@cat $(grub_bin) > $@
-	@$(edit_mbr) -l $(installer_layout) -i $@ \
+	$(hide) cat $(grub_bin) > $@
+	$(hide) $(edit_mbr) -l $(installer_layout) -i $@ \
 		inst_boot=$(installer_tmp_img) \
 		inst_data=$(installer_data_img)
 	@echo "Done with bootable installer image -[ $@ ]-"
+
+#
+# Ditto for the android_system_disk and android_data_disk images
+#
+
+INSTALLED_ANDROID_IMAGE_SYSTEM_TARGET := $(PRODUCT_OUT)/android_system_disk.img
+android_system_layout := $(diskinstaller_root)/android_img_system_layout.conf
+
+INSTALLED_ANDROID_IMAGE_DATA_TARGET := $(PRODUCT_OUT)/android_data_disk.img
+android_data_layout := $(diskinstaller_root)/android_img_data_layout.conf
+
+$(INSTALLED_ANDROID_IMAGE_SYSTEM_TARGET): \
+					$(INSTALLED_SYSTEMIMAGE) \
+					$(INSTALLED_BOOTIMAGE_TARGET) \
+					$(grub_bin) \
+					$(edit_mbr) \
+					$(android_system_layout)
+	@echo "Creating bootable android system-disk image: $@"
+	@rm -f $@
+	$(hide) cat $(grub_bin) > $@
+	$(hide) $(edit_mbr) -l $(android_system_layout) -i $@ \
+		inst_boot=$(INSTALLED_BOOTIMAGE_TARGET) \
+		inst_system=$(INSTALLED_SYSTEMIMAGE)
+	@echo "Done with bootable android system-disk image -[ $@ ]-"
+
+$(INSTALLED_ANDROID_IMAGE_DATA_TARGET): \
+					$(INSTALLED_USERDATAIMAGE_TARGET) \
+					$(INSTALLED_CACHEIMAGE_TARGET) \
+					$(grub_bin) \
+					$(edit_mbr) \
+					$(android_data_layout)
+	@echo "Creating bootable android data-disk image: $@"
+	@rm -f $@
+	$(hide) cat $(grub_bin) > $@
+	$(hide) $(edit_mbr) -l $(android_data_layout) -i $@ \
+		inst_data=$(INSTALLED_USERDATAIMAGE_TARGET) \
+		inst_cache=$(INSTALLED_CACHEIMAGE_TARGET)
+	@echo "Done with bootable android data-disk image -[ $@ ]-"
+
 
 
 ######################################################################
 # now convert the installer_img (disk image) to a VirtualBox image
 
-INSTALLED_VBOXINSTALLERIMAGE_TARGET := $(PRODUCT_OUT)/installer.vdi
+INSTALLED_VBOX_INSTALLER_IMAGE_TARGET := $(PRODUCT_OUT)/installer.vdi
 virtual_box_manager := VBoxManage
-virtual_box_manager_options := convertfromraw
+# hrd-code the UUID so we don't have to release the disk manually in the VirtualBox manager.
+virtual_box_manager_options := convertfromraw --format VDI
+virtual_box_manager_system_disk_ptions := --uuid "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}"
+virtual_box_manager_data_disk_ptions   := --uuid "{bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb}"
 
-$(INSTALLED_VBOXINSTALLERIMAGE_TARGET): $(INSTALLED_DISKINSTALLERIMAGE_TARGET)
-	@rm -f $(INSTALLED_VBOXINSTALLERIMAGE_TARGET)
-	@$(virtual_box_manager) $(virtual_box_manager_options) $(INSTALLED_DISKINSTALLERIMAGE_TARGET) $(INSTALLED_VBOXINSTALLERIMAGE_TARGET)
+$(INSTALLED_VBOX_INSTALLER_IMAGE_TARGET): $(INSTALLED_DISK_INSTALLER_IMAGE_TARGET)
+	@rm -f $(INSTALLED_VBOX_INSTALLER_IMAGE_TARGET)
+	$(hide) $(virtual_box_manager) $(virtual_box_manager_options) $(INSTALLED_DISK_INSTALLER_IMAGE_TARGET) $(INSTALLED_VBOX_INSTALLER_IMAGE_TARGET)
 	@echo "Done with VirtualBox bootable installer image -[ $@ ]-"
 
-else  # ! TARGET_USE_DISKINSTALLER
-INSTALLED_DISKINSTALLERIMAGE_TARGET :=
-INSTALLED_VBOXINSTALLERIMAGE_TARGET :=
-endif
-endif # TARGET_ARCH == x86
+#
+# Ditto for the android_system_disk and android_user_disk images
+#
+
+INSTALLED_VBOX_SYSTEM_DISK_IMAGE_TARGET := $(PRODUCT_OUT)/android_system_disk.vdi
+$(INSTALLED_VBOX_SYSTEM_DISK_IMAGE_TARGET): $(INSTALLED_ANDROID_IMAGE_SYSTEM_TARGET)
+	@rm -f $@
+	$(hide) $(virtual_box_manager) \
+		$(virtual_box_manager_options) \
+		$(virtual_box_manager_system_disk_ptions) \
+		$^ $@
+	@echo "Done with VirtualBox bootable system-disk image -[ $@ ]-"
+
+INSTALLED_VBOX_DATA_DISK_IMAGE_TARGET := $(PRODUCT_OUT)/android_data_disk.vdi
+$(INSTALLED_VBOX_DATA_DISK_IMAGE_TARGET): $(INSTALLED_ANDROID_IMAGE_DATA_TARGET)
+	@rm -f $@
+	$(hide) $(virtual_box_manager) \
+		$(virtual_box_manager_options) \
+		$(virtual_box_manager_data_disk_ptions) \
+		$^ $@
+	@echo "Done with VirtualBox bootable data-disk image -[ $@ ]-"
 
 .PHONY: installer_img
-installer_img: $(INSTALLED_DISKINSTALLERIMAGE_TARGET)
+installer_img: $(INSTALLED_DISK_INSTALLER_IMAGE_TARGET)
 
 .PHONY: installer_vdi
-installer_vdi: $(INSTALLED_VBOXINSTALLERIMAGE_TARGET)
+installer_vdi: $(INSTALLED_VBOX_INSTALLER_IMAGE_TARGET)
+
+.PHONY: android_disk_vdi android_system_disk_vdi android_data_disk_vdi
+android_system_disk_vdi: $(INSTALLED_VBOX_SYSTEM_DISK_IMAGE_TARGET)
+android_data_disk_vdi: $(INSTALLED_VBOX_DATA_DISK_IMAGE_TARGET)
+android_disk_vdi: android_system_disk_vdi android_data_disk_vdi
+
+
+else  # ! TARGET_USE_DISKINSTALLER
+INSTALLED_DISK_INSTALLER_IMAGE_TARGET :=
+INSTALLED_VBOX_SYSTEM_DISK_IMAGE_TARGET :=
+INSTALLED_VBOX_DATA_DISK_IMAGE_TARGET :=
+endif
+endif # TARGET_ARCH == x86
